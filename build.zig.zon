@@ -1,0 +1,7 @@
+.{
+    .name = .zigma,
+    .version = "1.0.0",
+    .minimum_zig_version = "0.16.0",
+    .paths = .{""},
+    .fingerprint = 0x94102e7b0112d152,
+}
