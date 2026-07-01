@@ -6,8 +6,16 @@ fn testCliHandler(ctx: *zigma.cli.Context) !void {
     try ctx.writer.print("ran:{s}\n", .{ctx.value("name") orelse "none"});
 }
 
-test "package exposes stable 1.0.0 version" {
-    try std.testing.expectEqualStrings("1.0.0", zigma.version);
+fn testGlobalHandler(ctx: *zigma.cli.Context) !void {
+    try ctx.writer.print("env:{s} json:{any}\n", .{
+        ctx.globalString("env", "dev"),
+        ctx.globalBoolean("json", false),
+    });
+}
+
+test "package exposes version from build metadata" {
+    try std.testing.expect(zigma.version.len > 0);
+    try std.testing.expect(!std.mem.eql(u8, zigma.version, "0.0.0"));
 }
 
 test "ansi style can be disabled" {
@@ -126,7 +134,6 @@ test "argument parser writes useful diagnostics" {
 test "cli app dispatches subcommands aliases and parsed options" {
     const app: zigma.cli.App = .{
         .name = "demo",
-        .version = "1.2.3",
         .routes = &.{
             zigma.routeWithAliases(zigma.command("hello", "", &.{
                 zigma.option("name", 'n', "text", "world", ""),
@@ -157,6 +164,60 @@ test "cli app shows command help without explicit help option" {
     try zigma.cli.runWithCapabilities(std.testing.allocator, &writer.writer, app, &.{ "hello", "--help" }, .{ .ansi = false, .charset = .ascii });
     try std.testing.expect(std.mem.indexOf(u8, writer.written(), "Usage: hello") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.written(), "--name <text>") != null);
+}
+
+test "app help only shows version flag when version is configured" {
+    const without_version: zigma.cli.App = .{
+        .name = "demo",
+        .routes = &.{zigma.route(zigma.command("hello", "Greet.", &.{}), testCliHandler)},
+    };
+    var plain_writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer plain_writer.deinit();
+    try zigma.cli.writeHelp(&plain_writer.writer, without_version);
+    try std.testing.expect(std.mem.indexOf(u8, plain_writer.written(), "--version") == null);
+
+    const with_version: zigma.cli.App = .{
+        .name = "demo",
+        .version = "test-version",
+        .routes = &.{zigma.route(zigma.command("hello", "Greet.", &.{}), testCliHandler)},
+    };
+    var version_writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer version_writer.deinit();
+    try zigma.cli.writeHelp(&version_writer.writer, with_version);
+    try std.testing.expect(std.mem.indexOf(u8, version_writer.written(), "--version") != null);
+}
+
+test "cli app supports global options grouped help and hidden routes" {
+    const app: zigma.cli.App = .{
+        .name = "demo",
+        .options = &.{
+            zigma.opt("env", 'e', "name", "dev", "Environment."),
+            zigma.flag("json", null, "Render JSON."),
+        },
+        .routes = &.{
+            zigma.groupedRoute("Project", zigma.cmd("build", "Build project.", &.{}), testGlobalHandler),
+            zigma.groupedRoute("Project", zigma.cmd("test", "Run tests.", &.{}), testGlobalHandler),
+            zigma.hiddenRoute(zigma.cmd("internal", "Hidden command.", &.{}), testGlobalHandler),
+        },
+    };
+
+    var help_writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer help_writer.deinit();
+    try zigma.cli.runWithCapabilities(std.testing.allocator, &help_writer.writer, app, &.{"--help"}, .{ .ansi = false, .charset = .ascii });
+    try std.testing.expect(std.mem.indexOf(u8, help_writer.written(), "Project:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_writer.written(), "  build") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_writer.written(), "Global Options:") != null);
+    try std.testing.expect(std.mem.indexOf(u8, help_writer.written(), "internal") == null);
+
+    var run_writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer run_writer.deinit();
+    try zigma.cli.runWithCapabilities(std.testing.allocator, &run_writer.writer, app, &.{ "--env", "prod", "--json", "build" }, .{ .ansi = false, .charset = .ascii });
+    try std.testing.expectEqualStrings("env:prod json:true\n", run_writer.written());
+
+    var hidden_writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer hidden_writer.deinit();
+    try zigma.cli.runWithCapabilities(std.testing.allocator, &hidden_writer.writer, app, &.{"internal"}, .{ .ansi = false, .charset = .ascii });
+    try std.testing.expectEqualStrings("env:dev json:false\n", hidden_writer.written());
 }
 
 test "single command runner supplies parsed values and ui" {

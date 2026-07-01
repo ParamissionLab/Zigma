@@ -38,7 +38,7 @@ zig fetch --save=zigma path/to/Zigma
 From a Git repository:
 
 ```sh
-zig fetch --save=zigma git+https://example.com/your-org/zigma.git
+zig fetch --save=zigma git+https://github.com/ParamissionLab/Zigma.git
 ```
 
 Then add the module to your executable in `build.zig`:
@@ -118,6 +118,8 @@ zig build run -- --help
 - generated help
 - final flush
 
+Set `.version` on `zigma.App` only when your application wants `--version` output. Zigma's own `zigma.version` is generated from `build.zig.zon`, so package version bumps only need the package metadata updated.
+
 ## Quick Start: Subcommands
 
 Use `zigma.run` when the app has multiple commands.
@@ -140,7 +142,6 @@ fn dashboard(ctx: *zigma.Context) !void {
 pub fn main(init: std.process.Init) !void {
     try zigma.run(init, .{
         .name = "mytool",
-        .version = zigma.version,
         .description = "Small CLI with subcommands.",
         .routes = &.{
             zigma.routeWithAliases(zigma.cmd("hello", "Greet someone.", &.{
@@ -159,7 +160,6 @@ zig build run -- hello --name Ada
 zig build run -- hi --name Ada
 zig build run -- dashboard
 zig build run -- --help
-zig build run -- --version
 ```
 
 ## Handler Context
@@ -188,6 +188,7 @@ Important fields:
 | `ctx.allocator` | Allocator from the runner. |
 | `ctx.writer` | Output writer. |
 | `ctx.parsed` | Full parsed argument result. |
+| `ctx.global` | Parsed app-level options for multi-command apps. |
 | `ctx.caps` | Terminal capabilities: ANSI, color mode, charset, size. |
 | `ctx.ui` | Ready-to-use `widgets.Ui` configured from `ctx.caps`. |
 
@@ -202,6 +203,9 @@ Important methods:
 | `try ctx.int(u16, "port", 8080)` | Integer value with fallback. |
 | `ctx.positional(0)` | Positional argument by index. |
 | `ctx.count("verbose")` | Number of times an option appeared. |
+| `ctx.globalString("env", "dev")` | Global string option with fallback. |
+| `ctx.globalBoolean("json", false)` | Global boolean option. |
+| `try ctx.globalInt(u16, "port", 8080)` | Global integer option with fallback. |
 | `ctx.status(.success, "done")` | Shortcut for `ctx.ui.status`. |
 | `ctx.success("done")` | Shortcut success line. |
 | `ctx.info(...)`, `ctx.warning(...)`, `ctx.err(...)` | Common status shortcuts. |
@@ -254,6 +258,58 @@ Generated usage:
 ```text
 Usage: copy [options] <source> [dest]
 ```
+
+## Scaling To Large Apps
+
+Small tools can stay tiny with `zigma.runCommand`. Larger apps can use the same primitives with app-level options, lifecycle hooks, command groups, aliases, and hidden internal routes.
+
+```zig
+fn before(ctx: *zigma.Context) !void {
+    if (ctx.globalBoolean("verbose", false)) {
+        try ctx.info("verbose mode");
+    }
+}
+
+fn deploy(ctx: *zigma.Context) !void {
+    const env = ctx.globalString("env", "dev");
+    const target = ctx.positional(0) orelse "default";
+    try ctx.writer.print("deploy {s} to {s}\n", .{ target, env });
+}
+
+pub fn main(init: std.process.Init) !void {
+    try zigma.run(init, .{
+        .name = "ops",
+        .description = "Operations toolkit.",
+        .options = &.{
+            zigma.opt("env", 'e', "name", "dev", "Environment."),
+            zigma.flag("verbose", 'v', "Show detailed output."),
+        },
+        .before = before,
+        .routes = &.{
+            zigma.groupedRoute("Deploy", zigma.cmdArgs("deploy", "Deploy a target.", &.{}, &.{
+                zigma.optionalArg("target", "Target name."),
+            }), deploy),
+            zigma.hiddenRoute(zigma.cmd("internal-cache", "Maintenance task.", &.{}), deploy),
+        },
+    });
+}
+```
+
+Run it:
+
+```sh
+zig build run -- --env prod --verbose deploy api
+zig build run -- --help
+zig build run -- deploy --help
+```
+
+Large-app support includes:
+
+- App-level `options` parsed before the command.
+- `ctx.globalString`, `ctx.globalBoolean`, and `ctx.globalInt` for shared config.
+- `before` and `after` hooks at both app and route level.
+- `groupedRoute` for categorized help output.
+- `hiddenRoute` for internal commands that still dispatch but do not appear in help.
 
 ## UI Widgets
 
@@ -441,6 +497,8 @@ try zigma.tui.renderForm(ctx.writer, &.{
 | `zigma.helpFlag()` | Build `-h, --help`. |
 | `zigma.route(...)` | Root alias for a route. |
 | `zigma.routeWithAliases(...)` | Root alias for a route with aliases. |
+| `zigma.groupedRoute(...)` | Route grouped under a help heading. |
+| `zigma.hiddenRoute(...)` | Dispatchable route omitted from app help. |
 | `zigma.widgets.Ui.auto(writer)` | UI with default terminal setup. |
 | `zigma.widgets.Ui.plain(writer)` | Plain ASCII UI. |
 | `zigma.terminal.detectDefault(.{})` | Practical terminal defaults. |
@@ -495,4 +553,3 @@ zig fmt --check build.zig src examples tests
 ## License
 
 MIT. See [LICENSE](LICENSE).
-# Zigma

@@ -1,8 +1,10 @@
 //! Zigma is a lightweight Zig toolkit for building configurable CLI and
 //! terminal/TUI utilities.
 
+const build_options = @import("zigma_build_options");
+
 /// Current Zigma release version.
-pub const version = "1.0.0";
+pub const version = build_options.version;
 
 pub const ansi = @import("ansi.zig");
 pub const args = @import("args.zig");
@@ -37,3 +39,5 @@ pub const run = cli.runMain;
 pub const runCommand = cli.runCommandMain;
 pub const route = cli.route;
 pub const routeWithAliases = cli.routeWithAliases;
+pub const groupedRoute = cli.groupedRoute;
+pub const hiddenRoute = cli.hiddenRoute;

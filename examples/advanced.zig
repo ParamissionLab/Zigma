@@ -40,7 +40,6 @@ fn dashboard(ctx: *zigma.cli.Context) !void {
 pub fn main(init: std.process.Init) !void {
     try zigma.run(init, .{
         .name = "zigma-advanced",
-        .version = zigma.version,
         .description = "Advanced CLI/TUI app built with short Zigma APIs.",
         .routes = &.{
             zigma.routeWithAliases(zigma.cmd("hello", "Basic command with multilingual UTF-8 text.", &.{
