@@ -223,15 +223,30 @@ pub const MenuOptions = struct {
     normal_prefix: []const u8 = "  ",
 };
 
-/// Render a simple vertical menu.
+/// Render a simple vertical menu. Help text starts in one column: labels are
+/// padded to the widest label, and prefixes to the wider prefix.
 pub fn renderMenu(writer: *std.Io.Writer, items: []const MenuItem, selected: usize, options: MenuOptions) !void {
+    const prefix_width = @max(text.width(options.selected_prefix), text.width(options.normal_prefix));
+    var label_width: usize = 0;
+    for (items) |item| {
+        if (item.help.len > 0) label_width = @max(label_width, text.width(item.label));
+    }
+
     for (items, 0..) |item, i| {
-        try writer.writeAll(if (i == selected) options.selected_prefix else options.normal_prefix);
-        try writer.writeAll(item.label);
-        if (item.help.len > 0) try writer.print("  {s}", .{item.help});
+        const prefix = if (i == selected) options.selected_prefix else options.normal_prefix;
+        try text.writePadded(writer, prefix, prefix_width, .left);
+        if (item.help.len > 0) {
+            try text.writePadded(writer, item.label, label_width, .left);
+            try writer.print("{s}{s}", .{ menu_help_gap, item.help });
+        } else {
+            // No help: skip padding so the line has no trailing spaces.
+            try writer.writeAll(item.label);
+        }
         try writer.writeAll("\n");
     }
 }
+
+const menu_help_gap = "  ";
 
 /// Basic form field.
 pub const Field = struct {

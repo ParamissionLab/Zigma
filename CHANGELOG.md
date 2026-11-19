@@ -19,6 +19,7 @@ All notable changes to Zigma are documented here.
 - `tui.Screen.writeText` keeps wide glyphs two cells wide and attaches combining marks (such as Thai vowels and tone marks) to their base character, so rows stay aligned.
 - Progress bar math no longer overflows for very large totals.
 - Table vertical borders now use `border_style`, like horizontal borders.
+- `tui.renderMenu` pads labels (by display width) and prefixes so help text starts in one column.
 
 ### Changed
 

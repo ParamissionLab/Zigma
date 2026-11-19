@@ -599,3 +599,19 @@ test "progress math does not overflow for large totals" {
     try zigma.widgets.renderProgress(&writer.writer, big / 2, big, .{ .width = 4, .fill = "#", .empty = "-" });
     try std.testing.expectEqualStrings("[#---] 49%", writer.written());
 }
+
+test "menu help text starts in one column" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try zigma.tui.renderMenu(&writer.writer, &.{
+        .{ .label = "Overview", .help = "basic screen" },
+        .{ .label = "ตั้งค่า", .help = "forms" },
+        .{ .label = "Quit" },
+    }, 1, .{ .selected_prefix = "-> " });
+    try std.testing.expectEqualStrings(
+        "   Overview  basic screen\n" ++
+            "-> ตั้งค่า      forms\n" ++
+            "   Quit\n",
+        writer.written(),
+    );
+}
