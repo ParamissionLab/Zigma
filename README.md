@@ -16,6 +16,47 @@ Use the high-level API first. Drop to the explicit modules only when you need cu
 - Unicode-aware text helpers for common terminal text width, padding, truncation, wrapping, and alignment.
 - ASCII-safe glyph fallbacks for Windows, CI, redirected output, or terminals with broken line art.
 
+## Showcase
+
+Every image below is real output from the programs in [`examples/`](examples), captured by [`docs/showcase/render.py`](docs/showcase/render.py).
+
+### A complete CLI in one call
+
+`zigma.runCommand` parses argv, sets up stdout and UTF-8, and gives the handler a ready `ctx.ui`. Source: [`examples/basic.zig`](examples/basic.zig).
+
+![zigma-basic output: status line, greeting, and progress meter](docs/showcase/single-command.svg)
+
+### Subcommands with generated help
+
+Declare routes with aliases and Zigma writes the help screen. `--help` and `-h` work without declaring a help option. Source: [`examples/advanced.zig`](examples/advanced.zig).
+
+![zigma-advanced --help output listing commands and aliases](docs/showcase/app-help.svg)
+
+### Clear diagnostics for user mistakes
+
+A mistyped option prints what went wrong, followed by the command's help. Defaults can hold any UTF-8 text, Thai in this example.
+
+![zigma-advanced diagnostic for an unknown option followed by command help](docs/showcase/diagnostics.svg)
+
+### Status, key/value rows, tables, and boxes
+
+Widgets measure display width, so Thai, Japanese, Arabic, and emoji keep columns aligned. On terminals that cannot draw line art, the same calls switch to ASCII glyphs. Source: [`examples/tui.zig`](examples/tui.zig).
+
+![zigma-tui output: section title, status, key/value rows, a bordered table with multilingual text, and a box](docs/showcase/widgets.svg)
+
+### TUI building blocks
+
+Rules, layout constraints, menus with a selected item, and aligned forms. Source: the `dashboard` command in [`examples/advanced.zig`](examples/advanced.zig).
+
+![zigma-advanced dashboard output: rule, layout notes, menu, and form](docs/showcase/tui-primitives.svg)
+
+Regenerate the images after changing examples or widgets:
+
+```sh
+zig build install
+python docs/showcase/render.py
+```
+
 ## Requirements
 
 - Zig `0.16.0` or newer in the 0.16 series.
