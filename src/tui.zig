@@ -53,6 +53,9 @@ pub fn layout(rect: Rect, direction: Direction, constraints: []const Constraint,
     }
     const remaining = if (used < total) total - used else 0;
     const fill_size = if (fill_count == 0) 0 else remaining / fill_count;
+    // Hand the division remainder out one cell at a time so fills cover the
+    // whole area instead of leaving trailing cells unused.
+    var fill_extra = if (fill_count == 0) 0 else remaining % fill_count;
 
     var cursor_x = rect.x;
     var cursor_y = rect.y;
@@ -60,7 +63,11 @@ pub fn layout(rect: Rect, direction: Direction, constraints: []const Constraint,
         const requested = switch (constraint) {
             .fixed => |value| value,
             .percent => |value| (total * value) / 100,
-            .fill => fill_size,
+            .fill => blk: {
+                const extra: usize = if (fill_extra > 0) 1 else 0;
+                fill_extra -= extra;
+                break :blk fill_size + extra;
+            },
         };
         const available = if (direction == .horizontal)
             rect.x + rect.width - cursor_x
@@ -158,14 +165,36 @@ pub const Screen = struct {
         self.cells[(y * self.width) + x] = value;
     }
 
-    /// Write UTF-8 text starting at x,y. The cursor advances by display width.
+    /// Write UTF-8 text starting at x,y. The cursor advances by display width:
+    /// wide glyphs occupy two cells, combining marks (such as Thai vowel and
+    /// tone marks) join the preceding cell, and control characters are skipped.
+    /// Text that does not fit on the row is clipped.
     pub fn writeText(self: *Screen, x: usize, y: usize, value: []const u8) void {
+        if (y >= self.height) return;
         var cx = x;
-        var iter = CodepointSlices.init(value);
-        while (iter.next()) |slice| {
-            if (cx >= self.width) break;
-            self.put(cx, y, slice);
-            cx += @max(text.width(slice), 1);
+        var last: ?struct { cell: usize, start: usize } = null;
+        var i: usize = 0;
+        while (i < value.len) {
+            const start = i;
+            const decoded = text.nextCodepoint(value, i) orelse text.Decoded{ .value = replacement_char, .len = 1 };
+            i += decoded.len;
+            if (isControl(decoded.value)) continue;
+
+            const cell_width = text.codepointWidth(decoded.value);
+            if (cell_width == 0) {
+                if (last) |prev| {
+                    // Combining bytes directly follow the base glyph in `value`.
+                    self.cells[prev.cell] = value[prev.start..i];
+                    continue;
+                }
+            }
+            const cells = @max(cell_width, 1);
+            if (cx + cells > self.width) break;
+            const cell = (y * self.width) + cx;
+            self.cells[cell] = value[start..i];
+            if (cells == 2) self.cells[cell + 1] = wide_continuation;
+            last = .{ .cell = cell, .start = start };
+            cx += cells;
         }
     }
 
@@ -232,7 +261,7 @@ pub fn renderBox(writer: *std.Io.Writer, width: usize, height: usize, border: Bo
     if (width < 2 or height < 2) return;
 
     try writer.writeAll(border.top_left);
-    try repeat(writer, border.horizontal, width - 2);
+    try text.writeRepeated(writer, border.horizontal, width - 2);
     try writer.writeAll(border.top_right);
     try writer.writeAll("\n");
 
@@ -245,7 +274,7 @@ pub fn renderBox(writer: *std.Io.Writer, width: usize, height: usize, border: Bo
     }
 
     try writer.writeAll(border.bottom_left);
-    try repeat(writer, border.horizontal, width - 2);
+    try text.writeRepeated(writer, border.horizontal, width - 2);
     try writer.writeAll(border.bottom_right);
     try writer.writeAll("\n");
 }
@@ -279,24 +308,11 @@ pub fn decodeKey(bytes: []const u8) Key {
     return .{ .unknown = bytes };
 }
 
-fn repeat(writer: *std.Io.Writer, bytes: []const u8, count: usize) !void {
-    var i: usize = 0;
-    while (i < count) : (i += 1) try writer.writeAll(bytes);
+/// Marks the right half of a wide glyph; renders as nothing because the glyph
+/// in the left cell already covers both columns.
+const wide_continuation = "";
+const replacement_char: u21 = 0xfffd;
+
+fn isControl(cp: u21) bool {
+    return cp < 0x20 or (cp >= 0x7f and cp < 0xa0);
 }
-
-const CodepointSlices = struct {
-    bytes: []const u8,
-    index: usize = 0,
-
-    fn init(bytes: []const u8) CodepointSlices {
-        return .{ .bytes = bytes };
-    }
-
-    fn next(self: *CodepointSlices) ?[]const u8 {
-        if (self.index >= self.bytes.len) return null;
-        const start = self.index;
-        const len = std.unicode.utf8ByteSequenceLength(self.bytes[start]) catch 1;
-        self.index = @min(self.bytes.len, start + len);
-        return self.bytes[start..self.index];
-    }
-};

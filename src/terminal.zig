@@ -71,9 +71,7 @@ pub const DefaultOptions = struct {
 /// Derive terminal capabilities from explicit inputs and common environment
 /// conventions. Platform-specific TTY probing can be layered on by callers.
 pub fn detect(options: DetectOptions) Capabilities {
-    const forced = options.clicolor_force != null and !std.mem.eql(u8, options.clicolor_force.?, "0");
-    const disabled = options.no_color != null or isDumb(options.term);
-    const ansi_enabled = forced or (options.is_tty and !disabled);
+    const ansi_enabled = shouldUseColor(options.no_color, options.clicolor_force, options.is_tty and !isDumb(options.term));
 
     return .{
         .is_tty = options.is_tty,
@@ -96,6 +94,24 @@ pub fn detectDefault(options: DefaultOptions) Capabilities {
         .colorterm = options.colorterm,
         .charset = options.charset orelse charsetAfterUtf8Setup(utf8),
         .size = options.size,
+    });
+}
+
+/// Detect capabilities for a real output stream using the process environment.
+///
+/// Unlike `detectDefault`, this probes `file`: ANSI styling is only enabled
+/// when it is a terminal that accepts escape sequences (on Windows this also
+/// turns on virtual terminal processing), so redirected output stays plain.
+/// `NO_COLOR`, `CLICOLOR_FORCE`, `TERM`, and `COLORTERM` are read from
+/// `environ_map`.
+pub fn detectProcess(io: std.Io, file: std.Io.File, environ_map: *const std.process.Environ.Map) Capabilities {
+    const ansi_ready = if (file.enableAnsiEscapeCodes(io)) |_| true else |_| false;
+    return detectDefault(.{
+        .is_tty = ansi_ready,
+        .no_color = environ_map.get("NO_COLOR"),
+        .clicolor_force = environ_map.get("CLICOLOR_FORCE"),
+        .term = environ_map.get("TERM"),
+        .colorterm = environ_map.get("COLORTERM"),
     });
 }
 
@@ -134,7 +150,10 @@ pub fn shouldUseColor(no_color: ?[]const u8, clicolor_force: ?[]const u8, is_tty
     if (clicolor_force) |value| {
         if (!std.mem.eql(u8, value, "0")) return true;
     }
-    if (no_color != null) return false;
+    // Per no-color.org, an empty `NO_COLOR` does not disable color.
+    if (no_color) |value| {
+        if (value.len > 0) return false;
+    }
     return is_tty;
 }
 

@@ -220,19 +220,12 @@ pub fn runWithCapabilities(allocator: std.mem.Allocator, writer: *std.Io.Writer,
         try writeHelp(writer, app);
         return error.UnknownCommand;
     };
-    if (hasCommandHelp(command_argv[1..])) {
+    const parsed = try parseOrReport(allocator, writer, matched_route.command, command_argv[1..]);
+    defer parsed.deinit();
+    if (parsed.wantsHelp()) {
         try args.writeHelp(writer, matched_route.command);
         return;
     }
-
-    var diagnostic: args.Diagnostic = .{};
-    const parsed = args.parseDetailed(allocator, matched_route.command, command_argv[1..], &diagnostic) catch |err| {
-        try diagnostic.write(writer);
-        try writer.writeAll("\n");
-        try args.writeHelp(writer, matched_route.command);
-        return err;
-    };
-    defer parsed.deinit();
 
     var context: Context = .{
         .allocator = allocator,
@@ -244,10 +237,6 @@ pub fn runWithCapabilities(allocator: std.mem.Allocator, writer: *std.Io.Writer,
         .caps = caps,
         .ui = widgets.Ui.init(writer, caps),
     };
-    if (context.has("help")) {
-        try args.writeHelp(writer, matched_route.command);
-        return;
-    }
     if (app.before) |hook| try hook(&context);
     if (matched_route.before) |hook| try hook(&context);
     try matched_route.handler(&context);
@@ -277,19 +266,12 @@ pub fn runCommandWithCapabilities(
     argv: []const []const u8,
     caps: terminal.Capabilities,
 ) anyerror!void {
-    if (hasCommandHelp(argv)) {
+    const parsed = try parseOrReport(allocator, writer, cmd, argv);
+    defer parsed.deinit();
+    if (parsed.wantsHelp()) {
         try args.writeHelp(writer, cmd);
         return;
     }
-
-    var diagnostic: args.Diagnostic = .{};
-    const parsed = args.parseDetailed(allocator, cmd, argv, &diagnostic) catch |err| {
-        try diagnostic.write(writer);
-        try writer.writeAll("\n");
-        try args.writeHelp(writer, cmd);
-        return err;
-    };
-    defer parsed.deinit();
 
     const app: App = .{
         .name = cmd.name,
@@ -309,39 +291,73 @@ pub fn runCommandWithCapabilities(
         .caps = caps,
         .ui = widgets.Ui.init(writer, caps),
     };
-    if (context.has("help")) {
-        try args.writeHelp(writer, cmd);
-        return;
-    }
     try handler(&context);
 }
 
 /// Run an app from `std.process.Init` with default allocator, argv, stdout,
-/// UTF-8 setup, UI capabilities, and final flush.
+/// UTF-8 setup, UI capabilities, and final flush. Terminal capabilities are
+/// probed from the real stdout and environment (`NO_COLOR`, `TERM`, ...), so
+/// redirected output is plain. Output is flushed even when dispatch fails, so
+/// parser diagnostics always reach the user.
 pub fn runMain(init: std.process.Init, app: App) anyerror!void {
+    try runProcess(init, AppTarget{ .app = app });
+}
+
+/// Run a single-command CLI from `std.process.Init`. See `runMain`.
+pub fn runCommandMain(init: std.process.Init, cmd: args.Command, handler: Handler) anyerror!void {
+    try runProcess(init, CommandTarget{ .cmd = cmd, .handler = handler });
+}
+
+const stdout_buffer_size = 8192;
+
+const AppTarget = struct {
+    app: App,
+
+    fn dispatch(self: AppTarget, allocator: std.mem.Allocator, writer: *std.Io.Writer, argv: []const []const u8, caps: terminal.Capabilities) anyerror!void {
+        try runWithCapabilities(allocator, writer, self.app, argv, caps);
+    }
+};
+
+const CommandTarget = struct {
+    cmd: args.Command,
+    handler: Handler,
+
+    fn dispatch(self: CommandTarget, allocator: std.mem.Allocator, writer: *std.Io.Writer, argv: []const []const u8, caps: terminal.Capabilities) anyerror!void {
+        try runCommandWithCapabilities(allocator, writer, self.cmd, self.handler, argv, caps);
+    }
+};
+
+fn runProcess(init: std.process.Init, target: anytype) anyerror!void {
     const allocator = init.arena.allocator();
     const argv = try init.minimal.args.toSlice(allocator);
+    // argv[0] is the executable name, but the OS does not guarantee it exists.
+    const user_argv = if (argv.len > 0) argv[1..] else argv;
 
-    var stdout_buffer: [8192]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
+    const stdout_file = std.Io.File.stdout();
+    var stdout_buffer: [stdout_buffer_size]u8 = undefined;
+    var stdout_writer = stdout_file.writer(init.io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
+    const caps = terminal.detectProcess(init.io, stdout_file, init.environ_map);
 
-    try run(allocator, stdout, app, argv[1..]);
+    target.dispatch(allocator, stdout, user_argv, caps) catch |err| {
+        // Diagnostics and help were written before the error; do not lose them.
+        stdout.flush() catch {};
+        return err;
+    };
     try stdout.flush();
 }
 
-/// Run a single-command CLI from `std.process.Init` with default allocator,
-/// argv, stdout, UTF-8 setup, UI capabilities, and final flush.
-pub fn runCommandMain(init: std.process.Init, cmd: args.Command, handler: Handler) anyerror!void {
-    const allocator = init.arena.allocator();
-    const argv = try init.minimal.args.toSlice(allocator);
-
-    var stdout_buffer: [8192]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
-    const stdout = &stdout_writer.interface;
-
-    try runCommand(allocator, stdout, cmd, handler, argv[1..]);
-    try stdout.flush();
+/// Parse `argv` for `cmd`; on failure write the diagnostic and command help.
+fn parseOrReport(allocator: std.mem.Allocator, writer: *std.Io.Writer, cmd: args.Command, argv: []const []const u8) anyerror!args.Result {
+    var diagnostic: args.Diagnostic = .{};
+    return args.parseDetailed(allocator, cmd, argv, &diagnostic) catch |err| {
+        if (err != error.OutOfMemory) {
+            try diagnostic.write(writer);
+            try writer.writeAll("\n");
+            try args.writeHelp(writer, cmd);
+        }
+        return err;
+    };
 }
 
 /// Write application-level help.
@@ -354,7 +370,7 @@ pub fn writeHelp(writer: *std.Io.Writer, app: App) !void {
     try writeRouteGroups(writer, app.routes);
     if (app.options.len > 0) {
         try writer.writeAll("\nGlobal Options:\n");
-        try writeOptions(writer, app.options);
+        try args.writeOptions(writer, app.options);
     }
     try writer.writeAll("\nGlobal:\n");
     try writer.writeAll("  -h, --help       Show help\n");
@@ -395,34 +411,20 @@ fn globalTokenSpan(options: []const args.Option, argv: []const []const u8, index
         const raw = token[2..];
         const eq = std.mem.indexOfScalar(u8, raw, '=');
         const name = if (eq) |at| raw[0..at] else raw;
-        const spec = findLongOption(options, name) orelse return null;
+        const spec = options[args.findLong(options, name) orelse return null];
         if (spec.value_name != null and eq == null and index + 1 < argv.len) return 2;
         return 1;
     }
     if (std.mem.startsWith(u8, token, "-") and token.len > 1) {
         var short_i: usize = 1;
         while (short_i < token.len) : (short_i += 1) {
-            const spec = findShortOption(options, token[short_i]) orelse return null;
+            const spec = options[args.findShort(options, token[short_i]) orelse return null];
             if (spec.value_name != null) {
                 if (short_i + 1 < token.len) return 1;
                 return if (index + 1 < argv.len) 2 else 1;
             }
         }
         return 1;
-    }
-    return null;
-}
-
-fn findLongOption(options: []const args.Option, name: []const u8) ?args.Option {
-    for (options) |option| {
-        if (std.mem.eql(u8, option.long, name)) return option;
-    }
-    return null;
-}
-
-fn findShortOption(options: []const args.Option, short: u8) ?args.Option {
-    for (options) |option| {
-        if (option.short != null and option.short.? == short) return option;
     }
     return null;
 }
@@ -472,23 +474,6 @@ fn writeRoute(writer: *std.Io.Writer, entry: Route) !void {
     try writer.writeAll("\n");
 }
 
-fn writeOptions(writer: *std.Io.Writer, options: []const args.Option) !void {
-    for (options) |option| {
-        try writer.writeAll("  ");
-        if (option.short) |short| {
-            try writer.print("-{c}, ", .{short});
-        } else {
-            try writer.writeAll("    ");
-        }
-        try writer.print("--{s}", .{option.long});
-        if (option.value_name) |name| try writer.print(" <{s}>", .{name});
-        if (option.required) try writer.writeAll(" (required)");
-        if (option.default) |default| try writer.print(" [default: {s}]", .{default});
-        if (option.help.len > 0) try writer.print("\n      {s}", .{option.help});
-        try writer.writeAll("\n");
-    }
-}
-
 fn findRoute(routes: []const Route, name: []const u8) ?*const Route {
     for (routes) |*entry| {
         if (std.mem.eql(u8, entry.command.name, name)) return entry;
@@ -503,13 +488,4 @@ fn isHelp(token: []const u8) bool {
     return std.mem.eql(u8, token, "help") or
         std.mem.eql(u8, token, "--help") or
         std.mem.eql(u8, token, "-h");
-}
-
-fn hasCommandHelp(argv: []const []const u8) bool {
-    if (argv.len == 0) return false;
-    if (std.mem.eql(u8, argv[0], "help")) return true;
-    for (argv) |token| {
-        if (std.mem.eql(u8, token, "--help") or std.mem.eql(u8, token, "-h")) return true;
-    }
-    return false;
 }

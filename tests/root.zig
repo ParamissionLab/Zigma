@@ -467,3 +467,135 @@ test "tui layout screen menu and form support advanced flows" {
     try std.testing.expect(std.mem.indexOf(u8, writer.written(), "> Two") != null);
     try std.testing.expect(std.mem.indexOf(u8, writer.written(), "Name: Zigma") != null);
 }
+
+test "help tokens after -- or as option values are passed through" {
+    const command = zigma.cmd("grep", "", &.{
+        zigma.opt("pattern", 'p', "text", null, ""),
+    });
+
+    const after_separator = try zigma.args.parse(std.testing.allocator, command, &.{ "--", "--help", "-h" });
+    defer after_separator.deinit();
+    try std.testing.expect(!after_separator.wantsHelp());
+    try std.testing.expectEqualStrings("--help", after_separator.positional(0).?);
+    try std.testing.expectEqualStrings("-h", after_separator.positional(1).?);
+
+    const as_value = try zigma.args.parse(std.testing.allocator, command, &.{ "--pattern", "--help" });
+    defer as_value.deinit();
+    try std.testing.expect(!as_value.wantsHelp());
+    try std.testing.expectEqualStrings("--help", as_value.value("pattern").?);
+
+    const help_word = try zigma.args.parse(std.testing.allocator, command, &.{"help"});
+    defer help_word.deinit();
+    try std.testing.expect(!help_word.wantsHelp());
+    try std.testing.expectEqualStrings("help", help_word.positional(0).?);
+}
+
+test "help request skips required validation" {
+    const command = zigma.cmdArgs("copy", "", &.{
+        zigma.req("to", null, "path", ""),
+    }, &.{zigma.arg("source", "")});
+
+    const parsed = try zigma.args.parse(std.testing.allocator, command, &.{"-h"});
+    defer parsed.deinit();
+    try std.testing.expect(parsed.wantsHelp());
+}
+
+test "cli passes help tokens after -- to the handler" {
+    const app: zigma.cli.App = .{
+        .name = "demo",
+        .routes = &.{zigma.route(zigma.cmd("echo", "", &.{}), testPositionalHandler)},
+    };
+
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try zigma.cli.runWithCapabilities(std.testing.allocator, &writer.writer, app, &.{ "echo", "--", "--help" }, .{});
+    try std.testing.expectEqualStrings("arg:--help\n", writer.written());
+}
+
+fn testPositionalHandler(ctx: *zigma.cli.Context) !void {
+    try ctx.writer.print("arg:{s}\n", .{ctx.positional(0) orelse "none"});
+}
+
+test "out of memory is not reported as a parser diagnostic" {
+    var failing: std.testing.FailingAllocator = .init(std.testing.allocator, .{ .fail_index = 0 });
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+
+    try std.testing.expectError(error.OutOfMemory, zigma.cli.runCommandWithCapabilities(
+        failing.allocator(),
+        &writer.writer,
+        zigma.cmd("demo", "", &.{zigma.flag("x", 'x', "")}),
+        testCliHandler,
+        &.{"-x"},
+        .{},
+    ));
+    try std.testing.expectEqualStrings("", writer.written());
+}
+
+test "unknown short option diagnostic shows the user's token" {
+    var diagnostic: zigma.args.Diagnostic = .{};
+    try std.testing.expectError(error.UnknownOption, zigma.args.parseDetailed(
+        std.testing.allocator,
+        zigma.cmd("demo", "", &.{zigma.flag("verbose", 'v', "")}),
+        &.{"-vx"},
+        &diagnostic,
+    ));
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try diagnostic.write(&writer.writer);
+    try std.testing.expectEqualStrings("unknown option: -vx\n", writer.written());
+}
+
+test "empty NO_COLOR does not disable color" {
+    try std.testing.expect(zigma.terminal.shouldUseColor("", null, true));
+    try std.testing.expect(zigma.terminal.detect(.{ .is_tty = true, .no_color = "" }).ansi);
+    try std.testing.expect(!zigma.terminal.detect(.{ .is_tty = true, .no_color = "1" }).ansi);
+    try std.testing.expect(!zigma.terminal.detect(.{ .is_tty = true, .term = "dumb" }).ansi);
+}
+
+test "rule renders exactly the requested width" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try zigma.widgets.renderRule(&writer.writer, "next", zigma.widgets.Glyphs.ascii, .{}, 20);
+    try std.testing.expectEqualStrings("-- next ------------\n", writer.written());
+}
+
+test "truncation resets styles and keeps invalid bytes consistent with width" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try zigma.text.writeTruncated(&writer.writer, "\x1b[31mabcdef\x1b[0m", 4);
+    try std.testing.expectEqualStrings("\x1b[31mabc\x1b[0m…", writer.written());
+
+    var invalid: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer invalid.deinit();
+    try zigma.text.writeTruncated(&invalid.writer, "\xffabcdef", 4);
+    try std.testing.expectEqualStrings("\xffab…", invalid.written());
+}
+
+test "layout fills cover the whole area" {
+    var areas: [2]zigma.tui.Rect = undefined;
+    _ = zigma.tui.layout(.{ .width = 81, .height = 1 }, .horizontal, &.{ .fill, .fill }, &areas);
+    try std.testing.expectEqual(@as(usize, 41), areas[0].width);
+    try std.testing.expectEqual(@as(usize, 40), areas[1].width);
+    try std.testing.expectEqual(@as(usize, 41), areas[1].x);
+}
+
+test "screen keeps wide glyphs and thai combining marks aligned" {
+    var screen = try zigma.tui.Screen.init(std.testing.allocator, 6, 2);
+    defer screen.deinit();
+    screen.writeText(0, 0, "日本x");
+    screen.writeText(0, 1, "ที่นี่");
+
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    try screen.render(&writer.writer);
+    try std.testing.expectEqualStrings("日本x \nที่นี่    \n", writer.written());
+}
+
+test "progress math does not overflow for large totals" {
+    var writer: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer writer.deinit();
+    const big = std.math.maxInt(usize);
+    try zigma.widgets.renderProgress(&writer.writer, big / 2, big, .{ .width = 4, .fill = "#", .empty = "-" });
+    try std.testing.expectEqualStrings("[#---] 49%", writer.written());
+}

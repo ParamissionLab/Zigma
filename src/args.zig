@@ -113,11 +113,20 @@ pub const Result = struct {
     allocator: std.mem.Allocator,
     values: []Value,
     positionals: []const []const u8,
+    /// True when `--help` or `-h` appeared and the command does not declare
+    /// its own option with that name.
+    help_requested: bool = false,
 
     /// Free owned parser result memory.
     pub fn deinit(self: Result) void {
         self.allocator.free(self.values);
         self.allocator.free(self.positionals);
+    }
+
+    /// Return true when the user asked for help, through the implicit
+    /// `--help`/`-h` tokens or an explicitly declared `help` option.
+    pub fn wantsHelp(self: Result) bool {
+        return self.help_requested or self.has(implicit_help_long);
     }
 
     /// Return true when an option was present at least once.
@@ -127,10 +136,8 @@ pub const Result = struct {
 
     /// Return the last parsed value for an option, or its default.
     pub fn value(self: Result, name: []const u8) ?[]const u8 {
-        for (self.values) |entry| {
-            if (std.mem.eql(u8, entry.name, name)) return entry.value;
-        }
-        return null;
+        const entry = self.find(name) orelse return null;
+        return entry.value;
     }
 
     /// Return the parsed value, or `fallback` when missing.
@@ -141,21 +148,7 @@ pub const Result = struct {
     /// Return a boolean option value. Flags parse as true.
     pub fn boolean(self: Result, name: []const u8, fallback: bool) bool {
         const raw = self.value(name) orelse return fallback;
-        if (std.ascii.eqlIgnoreCase(raw, "true") or
-            std.mem.eql(u8, raw, "1") or
-            std.ascii.eqlIgnoreCase(raw, "yes") or
-            std.ascii.eqlIgnoreCase(raw, "on"))
-        {
-            return true;
-        }
-        if (std.ascii.eqlIgnoreCase(raw, "false") or
-            std.mem.eql(u8, raw, "0") or
-            std.ascii.eqlIgnoreCase(raw, "no") or
-            std.ascii.eqlIgnoreCase(raw, "off"))
-        {
-            return false;
-        }
-        return fallback;
+        return parseBool(raw) orelse fallback;
     }
 
     /// Parse an integer option value, or return `fallback` when missing.
@@ -172,15 +165,20 @@ pub const Result = struct {
 
     /// Return the number of times an option appeared.
     pub fn count(self: Result, name: []const u8) usize {
+        const entry = self.find(name) orelse return 0;
+        return entry.count;
+    }
+
+    fn find(self: Result, name: []const u8) ?Value {
         for (self.values) |entry| {
-            if (std.mem.eql(u8, entry.name, name)) return entry.count;
+            if (std.mem.eql(u8, entry.name, name)) return entry;
         }
-        return 0;
+        return null;
     }
 };
 
-/// Parser failures. Use `ParseErrorDetails` when user-facing messages need
-/// more context.
+/// Parser failures. Use `Diagnostic` when user-facing messages need more
+/// context.
 pub const Error = error{
     UnknownOption,
     MissingValue,
@@ -226,6 +224,10 @@ pub const Diagnostic = struct {
 /// Parse command-line tokens and populate `diagnostic` when a parser error
 /// occurs. This is the production-friendly variant for CLIs that need clear
 /// user-facing error messages.
+///
+/// `--help` and `-h` are recognized implicitly when the command does not
+/// declare options with those names; see `Result.wantsHelp`. Required options
+/// and arguments are not enforced when help is requested.
 pub fn parseDetailed(
     allocator: std.mem.Allocator,
     cmd: Command,
@@ -247,8 +249,9 @@ pub fn parseDetailed(
     var positionals: std.ArrayList([]const u8) = .empty;
     defer positionals.deinit(allocator);
 
-    var i: usize = 0;
+    var help_requested = false;
     var positional_only = false;
+    var i: usize = 0;
     while (i < argv.len) : (i += 1) {
         const token = argv[i];
         if (positional_only) {
@@ -264,26 +267,22 @@ pub fn parseDetailed(
             const eq = std.mem.indexOfScalar(u8, raw, '=');
             const name = if (eq) |at| raw[0..at] else raw;
             const spec_index = findLong(cmd.options, name) orelse {
+                if (eq == null and std.mem.eql(u8, name, implicit_help_long)) {
+                    help_requested = true;
+                    continue;
+                }
                 setDiagnostic(diagnostic, .unknown_option, token, name);
                 return error.UnknownOption;
             };
             const spec = cmd.options[spec_index];
-            if (spec.value_name) |_| {
-                const parsed_value = if (eq) |at| raw[at + 1 ..] else blk: {
-                    i += 1;
-                    if (i >= argv.len) {
-                        setDiagnostic(diagnostic, .missing_value, token, spec.long);
-                        return error.MissingValue;
-                    }
-                    break :blk argv[i];
-                };
-                values[spec_index].value = parsed_value;
+            if (spec.value_name != null) {
+                values[spec_index].value = if (eq) |at| raw[at + 1 ..] else try takeNext(argv, &i, token, spec, diagnostic);
             } else {
                 if (eq != null) {
                     setDiagnostic(diagnostic, .unknown_option, token, name);
                     return error.UnknownOption;
                 }
-                values[spec_index].value = "true";
+                values[spec_index].value = flag_true;
             }
             values[spec_index].count += 1;
             continue;
@@ -291,52 +290,36 @@ pub fn parseDetailed(
         if (std.mem.startsWith(u8, token, "-") and token.len > 1) {
             var short_i: usize = 1;
             while (short_i < token.len) : (short_i += 1) {
-                const spec_index = findShort(cmd.options, token[short_i]) orelse {
-                    setDiagnostic(diagnostic, .unknown_option, token[short_i .. short_i + 1], token[short_i .. short_i + 1]);
+                const short = token[short_i];
+                const spec_index = findShort(cmd.options, short) orelse {
+                    if (short == implicit_help_short) {
+                        help_requested = true;
+                        continue;
+                    }
+                    setDiagnostic(diagnostic, .unknown_option, token, token[short_i .. short_i + 1]);
                     return error.UnknownOption;
                 };
                 const spec = cmd.options[spec_index];
-                if (spec.value_name) |_| {
-                    const parsed_value = if (short_i + 1 < token.len) token[short_i + 1 ..] else blk: {
-                        i += 1;
-                        if (i >= argv.len) {
-                            setDiagnostic(diagnostic, .missing_value, token, spec.long);
-                            return error.MissingValue;
-                        }
-                        break :blk argv[i];
-                    };
-                    values[spec_index].value = parsed_value;
-                    values[spec_index].count += 1;
+                values[spec_index].count += 1;
+                if (spec.value_name != null) {
+                    // The rest of the bundle (`-nvalue`) or the next token is the value.
+                    values[spec_index].value = if (short_i + 1 < token.len) token[short_i + 1 ..] else try takeNext(argv, &i, token, spec, diagnostic);
                     break;
                 }
-                values[spec_index].value = "true";
-                values[spec_index].count += 1;
+                values[spec_index].value = flag_true;
             }
             continue;
         }
         try positionals.append(allocator, token);
     }
 
-    for (cmd.options, 0..) |opt, option_i| {
-        if (opt.required and values[option_i].count == 0 and opt.default == null) {
-            setDiagnostic(diagnostic, .missing_required_option, null, opt.long);
-            return error.MissingRequiredOption;
-        }
-    }
-    var required_arguments: usize = 0;
-    for (cmd.arguments) |argument| {
-        if (!argument.required) continue;
-        if (positionals.items.len <= required_arguments) {
-            setArgumentDiagnostic(diagnostic, argument.name);
-            return error.MissingRequiredArgument;
-        }
-        required_arguments += 1;
-    }
+    if (!help_requested) try validateRequired(cmd, values, positionals.items, diagnostic);
 
     return .{
         .allocator = allocator,
         .values = values,
         .positionals = try positionals.toOwnedSlice(allocator),
+        .help_requested = help_requested,
     };
 }
 
@@ -377,7 +360,12 @@ pub fn writeHelp(writer: *std.Io.Writer, cmd: Command) !void {
     if (cmd.options.len == 0) return;
 
     try writer.writeAll("\nOptions:\n");
-    for (cmd.options) |opt| {
+    try writeOptions(writer, cmd.options);
+}
+
+/// Write one help row per option. Shared by command help and app help.
+pub fn writeOptions(writer: *std.Io.Writer, options: []const Option) !void {
+    for (options) |opt| {
         try writer.writeAll("  ");
         if (opt.short) |short| {
             try writer.print("-{c}, ", .{short});
@@ -393,18 +381,63 @@ pub fn writeHelp(writer: *std.Io.Writer, cmd: Command) !void {
     }
 }
 
-fn findLong(options: []const Option, name: []const u8) ?usize {
+/// Return the index of the option whose long name is `name`.
+pub fn findLong(options: []const Option, name: []const u8) ?usize {
     for (options, 0..) |opt, i| {
         if (std.mem.eql(u8, opt.long, name)) return i;
     }
     return null;
 }
 
-fn findShort(options: []const Option, short: u8) ?usize {
+/// Return the index of the option whose short name is `short`.
+pub fn findShort(options: []const Option, short: u8) ?usize {
     for (options, 0..) |opt, i| {
-        if (opt.short != null and opt.short.? == short) return i;
+        if (opt.short == short) return i;
     }
     return null;
+}
+
+const implicit_help_long = "help";
+const implicit_help_short = 'h';
+const flag_true = "true";
+
+fn parseBool(raw: []const u8) ?bool {
+    const truthy = [_][]const u8{ "true", "1", "yes", "on" };
+    const falsy = [_][]const u8{ "false", "0", "no", "off" };
+    for (truthy) |word| {
+        if (std.ascii.eqlIgnoreCase(raw, word)) return true;
+    }
+    for (falsy) |word| {
+        if (std.ascii.eqlIgnoreCase(raw, word)) return false;
+    }
+    return null;
+}
+
+fn takeNext(argv: []const []const u8, index: *usize, token: []const u8, spec: Option, diagnostic: ?*Diagnostic) Error![]const u8 {
+    index.* += 1;
+    if (index.* >= argv.len) {
+        setDiagnostic(diagnostic, .missing_value, token, spec.long);
+        return error.MissingValue;
+    }
+    return argv[index.*];
+}
+
+fn validateRequired(cmd: Command, values: []const Value, positionals: []const []const u8, diagnostic: ?*Diagnostic) Error!void {
+    for (cmd.options, values) |opt, entry| {
+        if (opt.required and entry.count == 0 and opt.default == null) {
+            setDiagnostic(diagnostic, .missing_required_option, null, opt.long);
+            return error.MissingRequiredOption;
+        }
+    }
+    var required_arguments: usize = 0;
+    for (cmd.arguments) |argument| {
+        if (!argument.required) continue;
+        if (positionals.len <= required_arguments) {
+            setArgumentDiagnostic(diagnostic, argument.name);
+            return error.MissingRequiredArgument;
+        }
+        required_arguments += 1;
+    }
 }
 
 fn setDiagnostic(diagnostic: ?*Diagnostic, kind: DiagnosticKind, token: ?[]const u8, opt: ?[]const u8) void {

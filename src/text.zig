@@ -51,30 +51,35 @@ pub fn writePadded(writer: *std.Io.Writer, bytes: []const u8, target_width: usiz
 }
 
 /// Write `bytes`, truncating to `max_width` and appending an ellipsis when
-/// there is not enough room.
+/// there is not enough room. ANSI CSI sequences are kept; when a truncated
+/// prefix contains one, a reset is written so styles do not leak past the cut.
 pub fn writeTruncated(writer: *std.Io.Writer, bytes: []const u8, max_width: usize) !void {
     if (max_width == 0) return;
     if (width(bytes) <= max_width) {
         try writer.writeAll(bytes);
         return;
     }
-    if (max_width == 1) {
-        try writer.writeAll("…");
-        return;
-    }
 
+    // Reserve one cell for the ellipsis.
+    const budget = max_width - 1;
     var used: usize = 0;
     var end: usize = 0;
-    while (end < bytes.len and used + 1 < max_width) {
-        if (skipAnsi(bytes, &end)) continue;
-        const decoded = nextCodepoint(bytes, end) orelse break;
+    var saw_ansi = false;
+    while (end < bytes.len) {
+        if (skipAnsi(bytes, &end)) {
+            saw_ansi = true;
+            continue;
+        }
+        // Invalid bytes count as one cell, matching `width`.
+        const decoded = nextCodepoint(bytes, end) orelse Decoded{ .value = 0xfffd, .len = 1 };
         const cell_width = codepointWidth(decoded.value);
-        if (used + cell_width + 1 > max_width) break;
+        if (used + cell_width > budget) break;
         used += cell_width;
         end += decoded.len;
     }
     try writer.writeAll(bytes[0..end]);
-    try writer.writeAll("…");
+    if (saw_ansi) try writer.writeAll(ansi_reset);
+    try writer.writeAll(ellipsis);
 }
 
 /// Wrap words to a fixed width. Existing whitespace is collapsed between words.
@@ -103,16 +108,26 @@ pub fn writeWrapped(writer: *std.Io.Writer, bytes: []const u8, line_width: usize
 
 /// Write `count` spaces.
 pub fn writeSpaces(writer: *std.Io.Writer, count: usize) !void {
-    var i: usize = 0;
-    while (i < count) : (i += 1) try writer.writeAll(" ");
+    try writer.splatByteAll(' ', count);
 }
 
-const Decoded = struct {
+/// Write `bytes` `count` times. Used for line art built from multi-byte glyphs.
+pub fn writeRepeated(writer: *std.Io.Writer, bytes: []const u8, count: usize) !void {
+    var i: usize = 0;
+    while (i < count) : (i += 1) try writer.writeAll(bytes);
+}
+
+const ellipsis = "…";
+const ansi_reset = "\x1b[0m";
+
+/// Decoded UTF-8 codepoint and its byte length.
+pub const Decoded = struct {
     value: u21,
     len: usize,
 };
 
-fn nextCodepoint(bytes: []const u8, index: usize) ?Decoded {
+/// Decode the codepoint at `index`, or null for invalid or truncated UTF-8.
+pub fn nextCodepoint(bytes: []const u8, index: usize) ?Decoded {
     if (index >= bytes.len) return null;
     const len = std.unicode.utf8ByteSequenceLength(bytes[index]) catch return null;
     if (index + len > bytes.len) return null;
@@ -137,7 +152,9 @@ fn skipAnsi(bytes: []const u8, index: *usize) bool {
     return true;
 }
 
-fn codepointWidth(cp: u21) usize {
+/// Display cells for one codepoint: 0 for control and combining marks, 2 for
+/// wide CJK/emoji ranges, otherwise 1.
+pub fn codepointWidth(cp: u21) usize {
     if (cp == 0) return 0;
     if (cp < 0x20 or (cp >= 0x7f and cp < 0xa0)) return 0;
     if (isCombining(cp)) return 0;

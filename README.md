@@ -352,9 +352,14 @@ const ui = zigma.widgets.Ui.plain(writer);
 
 ## Terminal Defaults
 
-The high-level runners use `zigma.terminal.detectDefault(.{})`.
+The high-level runners (`zigma.run`, `zigma.runCommand`) use `zigma.terminal.detectProcess(io, stdout, environ_map)`:
 
-Defaults:
+- ANSI enabled only when stdout is a terminal that accepts escape sequences, so piped or redirected output is plain
+- `NO_COLOR` (non-empty) disables color, `CLICOLOR_FORCE` (not `0`) forces it, `TERM=dumb` disables it
+- `TERM` and `COLORTERM` select the color mode
+- output is flushed even when dispatch fails, so diagnostics always appear
+
+`zigma.terminal.detectDefault(.{})` (used by `Ui.auto`) does not probe a stream. Its defaults:
 
 - `is_tty = true`
 - ANSI enabled unless disabled through supplied options

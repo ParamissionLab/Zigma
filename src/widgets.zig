@@ -81,15 +81,10 @@ pub const Theme = struct {
     }
 
     fn applyEnabled(self: *Theme) void {
-        self.title.enabled = self.enabled;
-        self.header.enabled = self.enabled;
-        self.border.enabled = self.enabled;
-        self.text.enabled = self.enabled;
-        self.muted.enabled = self.enabled;
-        self.info.enabled = self.enabled;
-        self.success.enabled = self.enabled;
-        self.warning.enabled = self.enabled;
-        self.err.enabled = self.enabled;
+        // Covers every style field, including ones added later.
+        inline for (std.meta.fields(Theme)) |field| {
+            if (field.type == ansi.Style) @field(self, field.name).enabled = self.enabled;
+        }
     }
 };
 
@@ -196,12 +191,12 @@ pub const Ui = struct {
 
     /// Render a compact progress bar using the default width.
     pub fn meter(self: Ui, current: usize, total: usize) !void {
-        try self.progress(current, total, 24);
+        try self.progress(current, total, default_meter_width);
     }
 
     /// Render a horizontal rule with an optional title.
     pub fn rule(self: Ui, title: []const u8) !void {
-        try renderRule(self.writer, title, self.glyphs, self.theme.muted, 48);
+        try renderRule(self.writer, title, self.glyphs, self.theme.muted, default_rule_width);
     }
 
     /// Render a prompt.
@@ -236,17 +231,27 @@ pub fn renderStatusThemed(writer: *std.Io.Writer, status: Status, message: []con
     try writer.print("] {s}\n", .{message});
 }
 
-/// Render a horizontal rule.
+/// Default width of `Ui.meter` progress bars, in cells.
+pub const default_meter_width = 24;
+/// Default width of `Ui.rule`, in cells.
+pub const default_rule_width = 48;
+/// Maximum number of columns `renderTable` supports (widths live on the stack).
+pub const max_table_columns = 32;
+
+/// Render a horizontal rule `width` cells wide (at least 4). A title is drawn
+/// as `-- title --...`; titles wider than the rule are not truncated.
 pub fn renderRule(writer: *std.Io.Writer, title: []const u8, glyphs: Glyphs, style: ansi.Style, width: usize) !void {
+    const lead = 2;
     const safe_width = @max(width, 4);
     try style.writeStart(writer);
     if (title.len == 0) {
-        try writeRepeated(writer, glyphs.horizontal, safe_width);
+        try text.writeRepeated(writer, glyphs.horizontal, safe_width);
     } else {
-        try writeRepeated(writer, glyphs.horizontal, 2);
+        try text.writeRepeated(writer, glyphs.horizontal, lead);
         try writer.print(" {s} ", .{title});
-        const used = text.width(title) + 6;
-        if (used < safe_width) try writeRepeated(writer, glyphs.horizontal, safe_width - used);
+        // Lead glyphs plus the two spaces around the title.
+        const used = lead + text.width(title) + 2;
+        if (used < safe_width) try text.writeRepeated(writer, glyphs.horizontal, safe_width - used);
     }
     try style.writeEnd(writer);
     try writer.writeAll("\n");
@@ -308,8 +313,8 @@ pub fn renderTable(
 ) !void {
     if (columns.len == 0) return;
 
-    var widths_buffer: [32]usize = undefined;
-    if (columns.len > widths_buffer.len) return error.NoSpaceLeft;
+    var widths_buffer: [max_table_columns]usize = undefined;
+    if (columns.len > max_table_columns) return error.NoSpaceLeft;
     const widths = widths_buffer[0..columns.len];
 
     for (columns, 0..) |column, i| {
@@ -321,7 +326,7 @@ pub fn renderTable(
         }
     }
 
-    var header_buffer: [32][]const u8 = undefined;
+    var header_buffer: [max_table_columns][]const u8 = undefined;
     const headers = header_buffer[0..columns.len];
     for (columns, 0..) |column, i| headers[i] = column.title;
 
@@ -334,9 +339,9 @@ pub fn renderTable(
 
 /// Progress bar rendering options.
 pub const ProgressOptions = struct {
-    width: usize = 24,
-    fill: []const u8 = "█",
-    empty: []const u8 = "░",
+    width: usize = default_meter_width,
+    fill: []const u8 = Glyphs.unicode.progress_fill,
+    empty: []const u8 = Glyphs.unicode.progress_empty,
     glyphs: ?Glyphs = null,
     style: ansi.Style = .{},
     show_percent: bool = true,
@@ -346,26 +351,30 @@ pub const ProgressOptions = struct {
 pub fn renderProgress(writer: *std.Io.Writer, current: usize, total: usize, options: ProgressOptions) !void {
     const safe_total = if (total == 0) 1 else total;
     const capped = @min(current, safe_total);
-    const filled = (capped * options.width) / safe_total;
+    const filled = scaleRatio(capped, safe_total, options.width);
     const fill = if (options.glyphs) |glyphs| glyphs.progress_fill else options.fill;
     const empty = if (options.glyphs) |glyphs| glyphs.progress_empty else options.empty;
 
     try writer.writeAll("[");
     try options.style.writeStart(writer);
-    var i: usize = 0;
-    while (i < options.width) : (i += 1) {
-        try writer.writeAll(if (i < filled) fill else empty);
-    }
+    try text.writeRepeated(writer, fill, filled);
+    try text.writeRepeated(writer, empty, options.width - filled);
     try options.style.writeEnd(writer);
     try writer.writeAll("]");
     if (options.show_percent) {
-        try writer.print(" {d}%", .{(capped * 100) / safe_total});
+        try writer.print(" {d}%", .{scaleRatio(capped, safe_total, 100)});
     }
+}
+
+/// `part * scale / whole` without overflowing for large `usize` inputs.
+/// Requires `part <= whole` and `whole > 0`.
+fn scaleRatio(part: usize, whole: usize, scale: usize) usize {
+    return @intCast((@as(u128, part) * scale) / whole);
 }
 
 /// Spinner frame set.
 pub const Spinner = struct {
-    frames: []const []const u8 = &.{ "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" },
+    frames: []const []const u8 = Glyphs.unicode.spinner_frames,
 
     pub const unicode: Spinner = .{ .frames = Glyphs.unicode.spinner_frames };
     pub const ascii: Spinner = .{ .frames = Glyphs.ascii.spinner_frames };
@@ -396,21 +405,16 @@ fn renderBorder(writer: *std.Io.Writer, widths: []const usize, left: []const u8,
     try style.writeStart(writer);
     try writer.writeAll(left);
     for (widths, 0..) |cell_width, i| {
-        var n: usize = 0;
-        while (n < cell_width + 2) : (n += 1) try writer.writeAll(glyphs.horizontal);
+        // One padding space on each side of the cell.
+        try text.writeRepeated(writer, glyphs.horizontal, cell_width + 2);
         try writer.writeAll(if (i + 1 == widths.len) right else mid);
     }
     try style.writeEnd(writer);
     try writer.writeAll("\n");
 }
 
-fn writeRepeated(writer: *std.Io.Writer, bytes: []const u8, count: usize) !void {
-    var i: usize = 0;
-    while (i < count) : (i += 1) try writer.writeAll(bytes);
-}
-
 fn renderRow(writer: *std.Io.Writer, columns: []const Column, widths: []const usize, row: []const []const u8, options: TableOptions, style: ansi.Style) !void {
-    if (options.border) try writer.writeAll(options.glyphs.vertical);
+    if (options.border) try options.border_style.write(writer, options.glyphs.vertical);
     for (columns, 0..) |column, i| {
         try writer.writeAll(" ");
         try style.writeStart(writer);
@@ -422,7 +426,7 @@ fn renderRow(writer: *std.Io.Writer, columns: []const Column, widths: []const us
         try style.writeEnd(writer);
         try writer.writeAll(" ");
         if (options.border) {
-            try writer.writeAll(options.glyphs.vertical);
+            try options.border_style.write(writer, options.glyphs.vertical);
         } else if (i + 1 < columns.len) {
             try writer.writeAll(" ");
         }
